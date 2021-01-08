@@ -19,6 +19,10 @@ OPTIONS:
 	-d               Only generate output, don't set it as wallpaper
 ```
 
+# Download
+
+Each push to master builds a new [pre-release](https://github.com/JerwuQu/setwall/releases) that you can download.
+
 # Build
 
 See [the Github Actions build defs](https://github.com/JerwuQu/setwall/blob/master/.github/workflows/build.yml).
