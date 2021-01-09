@@ -32,13 +32,24 @@ typedef struct {
 	mon_t mons[MAX_MON_COUNT];
 } mondata_t;
 
+typedef struct {
+	int offsetX, offsetY, w, h;
+	unsigned char *data;
+} genimg_t;
+
+typedef struct {
+	const char *path;
+	const mon_t *mon;
+	genimg_t *target;
+} lrbf_data_t;
+
 static void fatal(char *str)
 {
 	fprintf(stderr, "FATAL ERROR: %s\n", str);
 	exit(1);
 }
 
-BOOL displayEnumProc(HMONITOR monitor, HDC hdc, LPRECT rect, LPARAM userdata)
+static BOOL displayEnumProc(HMONITOR monitor, HDC hdc, LPRECT rect, LPARAM userdata)
 {
 	(void)monitor; // unused
 	(void)hdc; // unused
@@ -53,6 +64,45 @@ BOOL displayEnumProc(HMONITOR monitor, HDC hdc, LPRECT rect, LPARAM userdata)
 	mondata->count++;
 
 	return TRUE;
+}
+
+static DWORD WINAPI loadResizeBlitFn(LPVOID param)
+{
+	lrbf_data_t *data = (lrbf_data_t*)param;
+
+	// Load
+	unsigned char *imgData;
+	int imgW, imgH;
+	imgData = stbi_load(data->path, &imgW, &imgH, NULL, IMG_PIXELSIZE);
+	if (!imgData) {
+		fprintf(stderr, "Failed to load image '%s'\n", data->path);
+		return 1;
+	}
+
+	// Resize if needed
+	if (imgW != data->mon->w || imgH != data->mon->h) {
+		unsigned char *resized = calloc(data->mon->w * data->mon->h, IMG_PIXELSIZE);
+		if (!resized)
+			fatal("failed to alloc resize space");
+		if (!stbir_resize_uint8(imgData, imgW, imgH, 0,
+				resized, data->mon->w, data->mon->h, 0, IMG_PIXELSIZE))
+			fatal("failed to resize image");
+		free(imgData);
+		imgData = resized;
+		imgW = data->mon->w;
+		imgH = data->mon->h;
+	}
+
+	// Blit into target image
+	for (int y = 0; y < data->mon->h; y++) {
+		memcpy(data->target->data + ((data->mon->pos.top + data->target->offsetY + y) * data->target->w
+						+ data->mon->pos.left + data->target->offsetX) * IMG_PIXELSIZE,
+				imgData + y * data->mon->w * IMG_PIXELSIZE,
+				data->mon->w * IMG_PIXELSIZE);
+	}
+
+	free(imgData);
+	return 0;
 }
 
 static void help(int exitcode)
@@ -117,10 +167,9 @@ int main(int argc, char **argv)
 
 	// Output path
 	if (outputFile == NULL) {
-		char tmpDir[MAX_PATH];
-		GetTempPathA(MAX_PATH, tmpDir);
+		const char defaultName[] = "setwall-wallpaper.png";
 		static char tmpFileName[MAX_PATH];
-		GetTempFileNameA(tmpDir, "wallpaper", 0, tmpFileName);
+		memcpy(tmpFileName + GetTempPathA(MAX_PATH, tmpFileName), defaultName, sizeof(defaultName));
 		outputFile = tmpFileName;
 	}
 	char outputAbsFile[MAX_PATH];
@@ -136,53 +185,32 @@ int main(int argc, char **argv)
 	}
 
 	// Generated image
-	const int genimgW = boundingBox.right - boundingBox.left;
-	const int genimgH = boundingBox.bottom - boundingBox.top;
-	unsigned char *genimgData = calloc(genimgW * genimgH, IMG_PIXELSIZE);
-	if (!genimgData)
+	genimg_t genimg = {
+		.w = boundingBox.right - boundingBox.left,
+		.h = boundingBox.bottom - boundingBox.top,
+		.offsetX = -boundingBox.left,
+		.offsetY = -boundingBox.top,
+	};
+	genimg.data = calloc(genimg.w * genimg.h, IMG_PIXELSIZE);
+	if (!genimg.data)
 		fatal("failed to alloc result image");
 
-	// Load images
+	// Load images in thread
+	static lrbf_data_t threadDatas[MAX_MON_COUNT] = { 0 };
+	static HANDLE threads[MAX_MON_COUNT] = { 0 };
 	for (int i = 0; i < mondata.count; i++) {
-		const char *path = argv[optind + i];
-		mon_t *mon = &mondata.mons[i];
-
-		// Load
-		unsigned char *imgData;
-		int imgW, imgH;
-		imgData = stbi_load(path, &imgW, &imgH, NULL, IMG_PIXELSIZE);
-		if (!imgData) {
-			fprintf(stderr, "Failed to load image '%s'\n", path);
-			return 1;
-		}
-
-		// Resize
-		if (imgW != mon->w || imgH != mon->h) {
-			unsigned char *resized = calloc(mon->w * mon->h, IMG_PIXELSIZE);
-			if (!resized)
-				fatal("failed to alloc resize space");
-			if (!stbir_resize_uint8(imgData, imgW, imgH, 0,
-					resized, mon->w, mon->h, 0, IMG_PIXELSIZE))
-				fatal("failed to resize image");
-			stbi_image_free(imgData);
-			imgData = resized;
-			imgW = mon->w;
-			imgH = mon->h;
-		}
-
-		// Place in genimg
-		for (int y = 0; y < mon->h; y++) {
-			memcpy(genimgData + ((mon->pos.top - boundingBox.top + y) * genimgW
-							+ mon->pos.left - boundingBox.left) * IMG_PIXELSIZE,
-					imgData + y * mon->w * IMG_PIXELSIZE,
-					mon->w * IMG_PIXELSIZE);
-		}
-
-		stbi_image_free(imgData);
+		threadDatas[i].path = argv[optind + i];
+		threadDatas[i].mon = &mondata.mons[i];
+		threadDatas[i].target = &genimg;
+		threads[i] = CreateThread(NULL, 0, loadResizeBlitFn, &threadDatas[i], 0, NULL);
+	}
+	WaitForMultipleObjects(mondata.count, threads, TRUE, INFINITE);
+	for (int i = 0; i < mondata.count; i++) {
+		CloseHandle(threads[i]);
 	}
 
 	// Write out
-	if (!stbi_write_png(outputAbsFile, genimgW, genimgH, IMG_PIXELSIZE, genimgData, 0))
+	if (!stbi_write_png(outputAbsFile, genimg.w, genimg.h, IMG_PIXELSIZE, genimg.data, 0))
 		fatal("failed to write output image");
 
 	if (setWall) {
@@ -198,9 +226,9 @@ int main(int argc, char **argv)
 		RegCloseKey(regKey);
 
 		// Set wall
-		SystemParametersInfo(SPI_SETDESKWALLPAPER, 0, outputAbsFile,
-				SPIF_UPDATEINIFILE | SPIF_SENDWININICHANGE);
+		SystemParametersInfo(SPI_SETDESKWALLPAPER, 0, outputAbsFile, SPIF_SENDCHANGE | SPIF_UPDATEINIFILE);
 	}
 
+	free(genimg.data);
 	return 0;
 }
