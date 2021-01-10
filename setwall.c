@@ -42,7 +42,7 @@ typedef struct {
 	const char *path;
 	const mon_t *mon;
 	genimg_t *target;
-} lrbf_data_t;
+} mon_thread_data_t;
 
 static BOOL displayEnumProc(HMONITOR monitor, HDC hdc, LPRECT rect, LPARAM userdata)
 {
@@ -60,16 +60,35 @@ static BOOL displayEnumProc(HMONITOR monitor, HDC hdc, LPRECT rect, LPARAM userd
 	return TRUE;
 }
 
-static DWORD WINAPI loadResizeBlitFn(LPVOID param)
+static DWORD WINAPI threadedLoadBlitImg(LPVOID param)
 {
-	lrbf_data_t *data = (lrbf_data_t*)param;
+	mon_thread_data_t *data = (mon_thread_data_t*)param;
 
 	// Load
 	int imgW, imgH;
 	unsigned char *imgData = stbi_load(data->path, &imgW, &imgH, NULL, IMG_PIXELSIZE);
 	if (!imgData) {
 		fprintf(stderr, "Failed to load image '%s'\n", data->path);
-		return 1;
+		exit(1);
+	}
+
+	// Crop to aspect ratio if needed
+	// TODO: crop to center rather than top-left
+	const double monAspect = (double)data->mon->w / data->mon->h;
+	const double imgAspect = (double)imgW / imgH;
+	if (imgAspect != monAspect) {
+		if (imgAspect > monAspect) {
+			// For reducing width we also need to move the image data
+			const int newImgW = imgH * monAspect;
+			for (int y = 0; y < imgH; y++) {
+				memmove(imgData + y * newImgW * IMG_PIXELSIZE,
+						imgData + y * imgW * IMG_PIXELSIZE,
+						newImgW * IMG_PIXELSIZE);
+			}
+			imgW = newImgW;
+		} else {
+			imgH = imgW / monAspect;
+		}
 	}
 
 	// Resize if needed
@@ -185,13 +204,13 @@ int main(int argc, char **argv)
 	assert(genimg.data);
 
 	// Load images in thread
-	static lrbf_data_t threadDatas[MAX_MON_COUNT] = { 0 };
+	static mon_thread_data_t threadDatas[MAX_MON_COUNT] = { 0 };
 	static HANDLE threads[MAX_MON_COUNT] = { 0 };
 	for (int i = 0; i < mondata.count; i++) {
 		threadDatas[i].path = argv[optind + i];
 		threadDatas[i].mon = &mondata.mons[i];
 		threadDatas[i].target = &genimg;
-		threads[i] = CreateThread(NULL, 0, loadResizeBlitFn, &threadDatas[i], 0, NULL);
+		threads[i] = CreateThread(NULL, 0, threadedLoadBlitImg, &threadDatas[i], 0, NULL);
 	}
 	WaitForMultipleObjects(mondata.count, threads, TRUE, INFINITE);
 	for (int i = 0; i < mondata.count; i++)
