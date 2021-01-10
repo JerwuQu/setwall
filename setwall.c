@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <getopt.h>
 #include <stdbool.h>
+#include <assert.h>
 #include <windows.h>
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -43,16 +44,9 @@ typedef struct {
 	genimg_t *target;
 } lrbf_data_t;
 
-static void fatal(char *str)
-{
-	fprintf(stderr, "FATAL ERROR: %s\n", str);
-	exit(1);
-}
-
 static BOOL displayEnumProc(HMONITOR monitor, HDC hdc, LPRECT rect, LPARAM userdata)
 {
-	(void)monitor; // unused
-	(void)hdc; // unused
+	(void)monitor; (void)hdc; // unused
 
 	mondata_t *mondata = (mondata_t*)userdata;
 	mon_t *mon = &mondata->mons[mondata->count];
@@ -71,9 +65,8 @@ static DWORD WINAPI loadResizeBlitFn(LPVOID param)
 	lrbf_data_t *data = (lrbf_data_t*)param;
 
 	// Load
-	unsigned char *imgData;
 	int imgW, imgH;
-	imgData = stbi_load(data->path, &imgW, &imgH, NULL, IMG_PIXELSIZE);
+	unsigned char *imgData = stbi_load(data->path, &imgW, &imgH, NULL, IMG_PIXELSIZE);
 	if (!imgData) {
 		fprintf(stderr, "Failed to load image '%s'\n", data->path);
 		return 1;
@@ -82,11 +75,9 @@ static DWORD WINAPI loadResizeBlitFn(LPVOID param)
 	// Resize if needed
 	if (imgW != data->mon->w || imgH != data->mon->h) {
 		unsigned char *resized = calloc(data->mon->w * data->mon->h, IMG_PIXELSIZE);
-		if (!resized)
-			fatal("failed to alloc resize space");
-		if (!stbir_resize_uint8(imgData, imgW, imgH, 0,
-				resized, data->mon->w, data->mon->h, 0, IMG_PIXELSIZE))
-			fatal("failed to resize image");
+		assert(resized);
+		assert(stbir_resize_uint8(imgData, imgW, imgH, 0,
+				resized, data->mon->w, data->mon->h, 0, IMG_PIXELSIZE));
 		free(imgData);
 		imgData = resized;
 		imgW = data->mon->w;
@@ -126,8 +117,7 @@ int main(int argc, char **argv)
 {
 	// Get displays
 	static mondata_t mondata = { 0 };
-	if (!EnumDisplayMonitors(NULL, NULL, displayEnumProc, (LPARAM)&mondata))
-		fatal("failed to enumerate displays");
+	assert(EnumDisplayMonitors(NULL, NULL, displayEnumProc, (LPARAM)&mondata));
 
 	// Options
 	char *outputFile = NULL;
@@ -192,8 +182,7 @@ int main(int argc, char **argv)
 		.offsetY = -boundingBox.top,
 	};
 	genimg.data = calloc(genimg.w * genimg.h, IMG_PIXELSIZE);
-	if (!genimg.data)
-		fatal("failed to alloc result image");
+	assert(genimg.data);
 
 	// Load images in thread
 	static lrbf_data_t threadDatas[MAX_MON_COUNT] = { 0 };
@@ -205,24 +194,25 @@ int main(int argc, char **argv)
 		threads[i] = CreateThread(NULL, 0, loadResizeBlitFn, &threadDatas[i], 0, NULL);
 	}
 	WaitForMultipleObjects(mondata.count, threads, TRUE, INFINITE);
-	for (int i = 0; i < mondata.count; i++) {
+	for (int i = 0; i < mondata.count; i++)
 		CloseHandle(threads[i]);
-	}
 
 	// Write out
-	if (!stbi_write_png(outputAbsFile, genimg.w, genimg.h, IMG_PIXELSIZE, genimg.data, 0))
-		fatal("failed to write output image");
+	if (!stbi_write_png(outputAbsFile, genimg.w, genimg.h, IMG_PIXELSIZE, genimg.data, 0)) {
+		fprintf(stderr, "failed to write output image '%s'\n", outputAbsFile);
+		return 1;
+	}
 
 	if (setWall) {
 		// Set wall properties in registry
 		HKEY regKey;
-		if (RegOpenKeyA(HKEY_CURRENT_USER, "Control Panel\\Desktop", &regKey))
-			fatal("failed to open desktop regkey, make sure you have access");
-		int tmp = 1;
-		if (RegSetValueExA(regKey, "WallpaperStyle", 0, REG_DWORD, (LPBYTE)&tmp, sizeof(DWORD)))
-			fatal("failed to set wallpaper style");
-		if (RegSetValueExA(regKey, "TileWallpaper", 0, REG_DWORD, (LPBYTE)&tmp, sizeof(DWORD)))
-			fatal("failed to set wallpaper tiling");
+		if (RegOpenKeyA(HKEY_CURRENT_USER, "Control Panel\\Desktop", &regKey)) {
+			fprintf(stderr, "failed to open desktop regkey, make sure you have access\n");
+			return 1;
+		}
+		const int tmp = 1;
+		assert(!RegSetValueExA(regKey, "WallpaperStyle", 0, REG_DWORD, (LPBYTE)&tmp, sizeof(DWORD)));
+		assert(!RegSetValueExA(regKey, "TileWallpaper", 0, REG_DWORD, (LPBYTE)&tmp, sizeof(DWORD)));
 		RegCloseKey(regKey);
 
 		// Set wall
